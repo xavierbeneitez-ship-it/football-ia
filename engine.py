@@ -1,55 +1,44 @@
 import requests
 import numpy as np
 from scipy.stats import poisson
+from datetime import datetime, timedelta
 
-class FootballEnginePro:
+class AdvancedFootballEngine:
     def __init__(self, api_key):
         self.api_key = api_key
         self.headers = {'x-apisports-key': api_key}
         self.base_url = "https://v3.football.api-sports.io/"
-        # Poids auto-adaptatifs par ligue
-        self.league_weights = {39: 1.0, 61: 1.0, 78: 1.0, 135: 1.0, 2: 1.0}
+        
+    def rho_correction(self, x, y, lambda_x, lambda_y, rho):
+        """Correction de Dixon-Coles pour les faibles scores (0-0, 1-0, 0-1, 1-1)"""
+        if x == 0 and y == 0: return 1 - (lambda_x * lambda_y * rho)
+        elif x == 0 and y == 1: return 1 + (lambda_x * rho)
+        elif x == 1 and y == 0: return 1 + (lambda_y * rho)
+        elif x == 1 and y == 1: return 1 - rho
+        return 1
 
-    def get_fixtures(self, league_id, season=2025):
-        """Récupère les prochains matchs de la saison"""
-        params = {"league": league_id, "season": season, "next": 10}
+    def get_fixtures_by_date(self, league_id, date_obj):
+        """Récupère les matchs pour une date précise"""
+        date_str = date_obj.strftime('%Y-%m-%d')
+        params = {"league": league_id, "season": 2025, "date": date_str}
         res = requests.get(f"{self.base_url}fixtures", headers=self.headers, params=params).json()
         return res.get('response', [])
 
-    def get_team_performance(self, league_id, team_id, season=2025):
-        """Analyse la forme sur les 10 derniers matchs (xG simulé)"""
-        params = {"league": league_id, "season": season, "team": team_id}
-        res = requests.get(f"{self.base_url}teams/statistics", headers=self.headers, params=params).json()
-        stats = res['response']
+    def calculate_advanced_prediction(self, home_stats, away_stats):
+        # Paramètres d'attaque et défense avec avantage domicile (HFA)
+        hfa = 1.25 # Home Field Advantage coefficient
         
-        # Extraction des moyennes de buts (Attaque/Défense)
-        att = stats['goals']['for']['average']['total']
-        def_ = stats['goals']['against']['average']['total']
-        return float(att), float(def_)
-
-    def predict_match(self, home_id, away_id, league_id):
-        h_att, h_def = self.get_team_performance(league_id, home_id)
-        a_att, a_def = self.get_team_performance(league_id, away_id)
-
-        # Calcul des espérances de buts (Lambda)
-        # On ajuste selon le poids de la ligue (Auto-learning)
-        lambda_h = h_att * a_def * self.league_weights.get(league_id, 1.0)
-        lambda_a = a_att * h_def * self.league_weights.get(league_id, 1.0)
-
-        # Simulation de Poisson
-        matrix = np.outer([poisson.pmf(i, lambda_h) for i in range(6)], 
-                          [poisson.pmf(j, lambda_a) for j in range(6)])
-
-        prob_h = np.sum(np.tril(matrix, -1))
-        prob_d = np.sum(np.diag(matrix))
-        prob_a = np.sum(np.triu(matrix, 1))
+        # Lambda calculé sur les moyennes pondérées
+        lambda_h = home_stats['att'] * away_stats['def'] * hfa
+        lambda_a = away_stats['att'] * home_stats['def']
         
-        score = np.unravel_index(np.argmax(matrix), matrix.shape)
-        over25 = 1 - np.sum(matrix[0:2, 0:2]) # Probabilité simplifiée > 2.5
-
-        return {
-            "probs": [prob_h, prob_d, prob_a],
-            "score": f"{score[0]} - {score[1]}",
-            "over25": over25,
-            "confidence": max(prob_h, prob_a) * 100
-        }
+        # Correction de corrélation (Dixon-Coles rho)
+        rho = -0.11 # Valeur empirique moyenne pour les ligues européennes
+        
+        matrix = np.zeros((6, 6))
+        for i in range(6):
+            for j in range(6):
+                prob = poisson.pmf(i, lambda_h) * poisson.pmf(j, lambda_a)
+                matrix[i, j] = prob * self.rho_correction(i, j, lambda_h, lambda_a, rho)
+        
+        return matrix
