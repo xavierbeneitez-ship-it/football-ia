@@ -1,44 +1,48 @@
 import requests
 import numpy as np
 from scipy.stats import poisson
-from datetime import datetime, timedelta
 
 class AdvancedFootballEngine:
     def __init__(self, api_key):
         self.api_key = api_key
-        self.headers = {'x-apisports-key': api_key}
+        self.headers = {
+            'x-rapidapi-host': "v3.football.api-sports.io",
+            'x-apisports-key': api_key
+        }
         self.base_url = "https://v3.football.api-sports.io/"
-        
-    def rho_correction(self, x, y, lambda_x, lambda_y, rho):
-        """Correction de Dixon-Coles pour les faibles scores (0-0, 1-0, 0-1, 1-1)"""
-        if x == 0 and y == 0: return 1 - (lambda_x * lambda_y * rho)
-        elif x == 0 and y == 1: return 1 + (lambda_x * rho)
-        elif x == 1 and y == 0: return 1 + (lambda_y * rho)
-        elif x == 1 and y == 1: return 1 - rho
-        return 1
 
     def get_fixtures_by_date(self, league_id, date_obj):
-        """Récupère les matchs pour une date précise"""
         date_str = date_obj.strftime('%Y-%m-%d')
         params = {"league": league_id, "season": 2025, "date": date_str}
-        res = requests.get(f"{self.base_url}fixtures", headers=self.headers, params=params).json()
-        return res.get('response', [])
+        response = requests.get(f"{self.base_url}fixtures", headers=self.headers, params=params)
+        data = response.json()
+        return data.get('response', [])
 
-    def calculate_advanced_prediction(self, home_stats, away_stats):
-        # Paramètres d'attaque et défense avec avantage domicile (HFA)
-        hfa = 1.25 # Home Field Advantage coefficient
+    def get_team_stats(self, league_id, team_id):
+        params = {"league": league_id, "season": 2025, "team": team_id}
+        res = requests.get(f"{self.base_url}teams/statistics", headers=self.headers, params=params).json()
+        if 'response' in res:
+            s = res['response']
+            # Extraction des moyennes de buts
+            att = s['goals']['for']['average']['total']
+            dfn = s['goals']['against']['average']['total']
+            return float(att or 1.0), float(dfn or 1.0)
+        return 1.2, 1.2 # Valeurs par défaut si pas de stats
+
+    def predict(self, h_id, a_id, l_id):
+        h_att, h_def = self.get_team_stats(l_id, h_id)
+        a_att, a_def = self.get_team_stats(l_id, a_id)
         
-        # Lambda calculé sur les moyennes pondérées
-        lambda_h = home_stats['att'] * away_stats['def'] * hfa
-        lambda_a = away_stats['att'] * home_stats['def']
+        # Algorithme de Poisson
+        lambda_h = h_att * a_def
+        lambda_a = a_att * h_def
         
-        # Correction de corrélation (Dixon-Coles rho)
-        rho = -0.11 # Valeur empirique moyenne pour les ligues européennes
+        matrix = np.outer([poisson.pmf(i, lambda_h) for i in range(6)], 
+                          [poisson.pmf(j, lambda_a) for j in range(6)])
         
-        matrix = np.zeros((6, 6))
-        for i in range(6):
-            for j in range(6):
-                prob = poisson.pmf(i, lambda_h) * poisson.pmf(j, lambda_a)
-                matrix[i, j] = prob * self.rho_correction(i, j, lambda_h, lambda_a, rho)
+        prob_h = np.sum(np.tril(matrix, -1))
+        prob_d = np.sum(np.diag(matrix))
+        prob_a = np.sum(np.triu(matrix, 1))
+        score = np.unravel_index(np.argmax(matrix), matrix.shape)
         
-        return matrix
+        return prob_h, prob_d, prob_a, score
